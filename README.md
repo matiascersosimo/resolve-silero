@@ -6,5 +6,5 @@ Script local para Windows que exporta el audio entre las marcas In y Out, detect
 
 1. Instalá Python con el lanzador `py` y ejecutá `py -m pip install torch silero-vad`.
 2. Agregá FFmpeg al Path o configurá la variable de entorno `SILERO_FFMPEG` con la ruta completa a `ffmpeg.exe`.
-3. Creá una carpeta `Silero` dentro de `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility`. Copiá allí los dos archivos Lua, `detectar_silencios.py` y `ResolveMenuSession.exe` de `outputs`. El código fuente del auxiliar está en `outputs/ResolveMenu.cs`.
-4. Abrí Resolve, marcá In y Out en la timeline y ejecutá **Silero - Cortar silencios** desde **Workspace → Scripts**. El resumen de la edición aparece en **Workspace → Console**.
+3. Creá una carpeta `Silero` dentro de `%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility`. Copiá allí los tres archivos Lua, `detectar_silencios.py` y `ResolveMenuSession.exe` de `outputs`. El código fuente del auxiliar está en `outputs/ResolveMenu.cs`.
+4. Abrí Resolve, marcá In y Out en la timeline y ejecutá **Silero - Cortar silencios** desde **Workspace → Scripts**. Una ventana muestra la exportación del WAV, el análisis y la cantidad de silencios eliminados y verificados. Al terminar muestra el tiempo recortado. El detalle de cualquier error también aparece en **Workspace → Console**.

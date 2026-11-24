@@ -4,6 +4,101 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Automation;
+using System.Drawing;
+using System.Windows.Forms;
+
+internal sealed class StatusWindow : Form
+{
+    readonly string path;
+    readonly Process owner;
+    readonly Label phase = new Label();
+    readonly Label detail = new Label();
+    readonly ProgressBar progress = new ProgressBar();
+    readonly System.Windows.Forms.Timer timer = new System.Windows.Forms.Timer();
+    DateTime closeAt = DateTime.MaxValue;
+    string last;
+
+    protected override bool ShowWithoutActivation { get { return true; } }
+    protected override CreateParams CreateParams
+    {
+        get
+        {
+            var p = base.CreateParams;
+            p.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+            return p;
+        }
+    }
+
+    public StatusWindow(string path, int ownerId)
+    {
+        this.path = path;
+        owner = Process.GetProcessById(ownerId);
+        Text = "Silero · Cortar silencios";
+        FormBorderStyle = FormBorderStyle.FixedToolWindow;
+        ControlBox = false;
+        ShowInTaskbar = false;
+        TopMost = true;
+        StartPosition = FormStartPosition.Manual;
+        ClientSize = new Size(352, 112);
+        var screen = Screen.FromHandle(owner.MainWindowHandle).WorkingArea;
+        Location = new Point(screen.Right - Width - 16, screen.Bottom - Height - 16);
+        BackColor = Color.FromArgb(36, 38, 42);
+        phase.SetBounds(14, 12, 324, 26);
+        phase.ForeColor = Color.White;
+        phase.Font = new Font("Segoe UI", 11, FontStyle.Bold);
+        phase.Text = "Preparando…";
+        detail.SetBounds(14, 42, 324, 40);
+        detail.ForeColor = Color.Gainsboro;
+        detail.AutoEllipsis = true;
+        progress.SetBounds(14, 88, 324, 8);
+        progress.Style = ProgressBarStyle.Marquee;
+        Controls.AddRange(new Control[] { phase, detail, progress });
+        timer.Interval = 100;
+        timer.Tick += delegate { RefreshStatus(); };
+        timer.Start();
+    }
+
+    void RefreshStatus()
+    {
+        if (owner.HasExited || DateTime.UtcNow >= closeAt) { Close(); return; }
+        string record;
+        try
+        {
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+            using (var reader = new StreamReader(stream))
+                record = reader.ReadToEnd();
+        }
+        catch (IOException) { return; }
+        if (record == last || !record.EndsWith("\n")) return;
+        var parts = record.TrimEnd('\r', '\n').Split('\t');
+        if (parts.Length != 4) return;
+        last = record;
+        phase.Text = parts[2];
+        detail.Text = parts[3];
+        int value;
+        if (int.TryParse(parts[1], out value) && value >= 0)
+        {
+            progress.Style = ProgressBarStyle.Continuous;
+            progress.Value = Math.Min(value, 100);
+        }
+        else progress.Style = ProgressBarStyle.Marquee;
+        if (parts[0] == "done") closeAt = DateTime.UtcNow.AddSeconds(5);
+        if (parts[0] == "error")
+        {
+            progress.Visible = false;
+            ControlBox = true;
+            closeAt = DateTime.UtcNow.AddSeconds(35);
+        }
+    }
+
+    protected override void OnFormClosed(FormClosedEventArgs e)
+    {
+        timer.Dispose();
+        owner.Dispose();
+        try { File.Delete(path); } catch (IOException) { }
+        base.OnFormClosed(e);
+    }
+}
 
 internal static class ResolveMenu
 {
@@ -132,8 +227,15 @@ internal static class ResolveMenu
     [STAThread]
     static int Main(string[] args)
     {
-        if (args.Length != 1) return 2;
         SetProcessDPIAware();
+        if (args.Length == 3 && args[0] == "--estado")
+        {
+            Application.EnableVisualStyles();
+            using (var status = new StatusWindow(args[1], int.Parse(args[2])))
+                Application.Run(status);
+            return 0;
+        }
+        if (args.Length != 1) return 2;
         string session = args[0];
         string stop = session + ".stop";
         var idle = Stopwatch.StartNew();

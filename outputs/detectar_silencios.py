@@ -2,6 +2,7 @@ import argparse
 from pathlib import Path
 import struct
 import subprocess
+import sys
 
 import torch
 from silero_vad import get_speech_timestamps, load_silero_vad
@@ -48,12 +49,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("wav", type=Path)
     parser.add_argument("--ffmpeg", default="ffmpeg")
+    parser.add_argument("--output", type=Path, help="Guardar los intervalos en un TSV")
     args = parser.parse_args()
 
     pcm = subprocess.check_output([
         args.ffmpeg, "-v", "error", "-i", str(args.wav), "-map", "0:a:0",
         "-ac", "1", "-ar", str(RATE), "-f", "s16le", "-",
-    ])
+    ], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     samples = [sample / 32768 for (sample,) in struct.iter_unpack("<h", pcm)]
     if not samples:
         parser.error("El WAV no contiene muestras de audio.")
@@ -64,8 +66,14 @@ def main():
         threshold=0.58, min_silence_duration_ms=80,
         speech_pad_ms=0,  # silence_intervals applies the margins once.
     )
-    for start, end in silence_intervals(speech, audio):
-        print(f"{start / RATE:.6f}\t{end / RATE:.6f}")
+    result = "".join(
+        f"{start / RATE:.6f}\t{end / RATE:.6f}\n"
+        for start, end in silence_intervals(speech, audio)
+    )
+    if args.output is not None:
+        args.output.write_text(result, encoding="utf-8")
+    else:
+        sys.stdout.write(result)
 
 
 if __name__ == "__main__":

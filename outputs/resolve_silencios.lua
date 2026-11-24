@@ -1,7 +1,9 @@
 -- Ejecutar desde la consola Lua de Resolve.
 local bridge = {}
+local base = assert(debug.getinfo(1, "S").source:sub(2):match("^(.*[/\\])"))
+local windows = assert(loadfile(base .. "silero_windows.lua"))()
 
-function bridge.exportar(carpeta)
+function bridge.exportar(carpeta, name)
     assert(not bridge.job, "Primero termina o limpia el render anterior.")
     local project = assert(resolve:GetProjectManager():GetCurrentProject())
     local timeline = assert(project:GetCurrentTimeline(), "Abri una timeline.")
@@ -13,7 +15,7 @@ function bridge.exportar(carpeta)
     assert(not project:IsRenderingInProgress(), "Resolve ya esta renderizando.")
 
     local start = timeline:GetStartFrame()
-    local name = "silero-" .. os.date("%Y%m%d-%H%M%S")
+    name = name or ("silero-" .. os.date("%Y%m%d-%H%M%S"))
     local old_page = resolve:GetCurrentPage()
     assert(resolve:OpenPage("deliver"), "No se pudo abrir Deliver.")
     local backup = name .. "-ajustes"
@@ -90,16 +92,6 @@ local function wait_for(check, seconds, message, poll_seconds)
         bmd.wait(poll_seconds or 0.1)
     until os.time() >= deadline
     error(message)
-end
-
-local function quote(path)
-    assert(not path:find('["%%!\r\n]'), "Ruta no compatible con cmd.exe.")
-    return '"' .. path .. '"'
-end
-
-local function command_succeeded(command)
-    local result = os.execute(command)
-    return result == true or result == 0
 end
 
 local function intervals_from_tsv(tsv, first, last, fps)
@@ -213,15 +205,12 @@ local function restore_marks(timeline, original, intervals, lowest_applied)
     end
 end
 
-function bridge.cortar(project, timeline, tsv, first, last)
-    local base = assert(debug.getinfo(1, "S").source:sub(2):match("^(.*[/\\])"))
-    local menu = quote(base .. "ResolveMenuSession.exe")
+function bridge.cortar(project, timeline, tsv, first, last, progress)
     local session = tsv .. ".session"
     local menu_count, started = 0, false
     local function run_menu(action)
         if not started then
-            local command = 'start "" /b ' .. menu .. " " .. quote(session)
-            assert(command_succeeded(command), "No se pudo iniciar el control de menu de Resolve.")
+            windows.start(base .. "ResolveMenuSession.exe", {session})
             started = true
         end
 
@@ -274,6 +263,7 @@ function bridge.cortar(project, timeline, tsv, first, last)
     local now = bmd.gettime or bmd.clock or os.time
     local cut_start = now()
     local ok, error_message = pcall(function()
+        if progress then progress(0, #intervals) end
         run_menu("Deselect")
         for i = #intervals, 1, -1 do
             assert_active()
@@ -300,6 +290,7 @@ function bridge.cortar(project, timeline, tsv, first, last)
             end, 5, "Resolve no cerro el rango en todas las pistas. Revisa Edit > Undo y la seleccion automatica de pistas.")
             removed = removed + b - a
             lowest_applied = i
+            if progress then progress(#intervals - i + 1, #intervals) end
         end
     end)
     if started then
@@ -320,23 +311,60 @@ function bridge.cortar(project, timeline, tsv, first, last)
     assert(ok, error_message)
     print(string.format("%d silencios eliminados (%.2f s) en %s. Edicion: %.2f s.",
         #intervals, removed / fps, timeline:GetName(), now() - cut_start))
-    return #intervals
+    return #intervals, removed / fps
 end
 
 function bridge.ejecutar(carpeta, ffmpeg)
-    local script = debug.getinfo(1, "S").source:sub(2)
-    local base = assert(script:match("^(.*[/\\])"), "Carga el script con la ruta completa.")
-    local detector = "py " .. quote(base .. "detectar_silencios.py")
-    local ffmpeg_option = ffmpeg and (" --ffmpeg " .. quote(ffmpeg)) or ""
-    quote(carpeta)
-    bridge.exportar(carpeta)
-    wait_for(function() return not bridge.job.project:IsRenderingInProgress() end,
-        900, "El render sigue en curso. Cuando termine, ejecuta bridge.wav().")
-    local wav, job = bridge.wav()
-    local tsv = wav .. ".tsv"
-    assert(command_succeeded(detector .. " " .. quote(wav) .. ffmpeg_option
-        .. " > " .. quote(tsv)), "Fallo la deteccion de Silero.")
-    return bridge.cortar(job.project, job.timeline, tsv, job.first, job.last)
+    local name = "silero-" .. os.date("%Y%m%d-%H%M%S") .. "-" .. windows.run_id()
+    local path = carpeta .. "/" .. name .. ".status"
+    local last_record
+    local function status(state, percent, title, detail)
+        local message = detail:gsub("[\r\n\t]", " ")
+        local record = table.concat({state, percent, title, message}, "\t") .. "\n"
+        if record == last_record then return end
+        local file = io.open(path, "wb")
+        if file then
+            local written = file:write(record)
+            if file:close() and written then last_record = record end
+        end
+    end
+    status("running", -1, "Preparando", "Leyendo el rango In/Out de la timeline.")
+    local launched, launch_error = pcall(windows.start, base .. "ResolveMenuSession.exe",
+        {"--estado", path, tostring(windows.pid())})
+    if not launched then os.remove(path); error(launch_error, 0) end
+    local ok, count, seconds = pcall(function()
+        bridge.exportar(carpeta, name)
+        local job = bridge.job
+        status("running", -1, "Exportando audio", "Renderizando el rango marcado en WAV.")
+        wait_for(function()
+            if not job.project:IsRenderingInProgress() then return true end
+            local info = job.project:GetRenderJobStatus(job.id)
+            local percent = tonumber(info and info.CompletionPercentage)
+            if percent then
+                status("running", math.floor(percent), "Exportando audio", string.format("%d %% del WAV", percent))
+            end
+        end, 900, "El render sigue en curso. Cuando termine, ejecuta bridge.wav().")
+        local wav = bridge.wav()
+        status("running", -1, "Detectando silencios", "Silero está analizando el audio.")
+        local tsv = wav .. ".tsv"
+        local args = {base .. "detectar_silencios.py", wav, "--output", tsv}
+        if ffmpeg then args[#args + 1] = "--ffmpeg"; args[#args + 1] = ffmpeg end
+        local code = windows.start("pyw.exe", args, true)
+        assert(code == 0, "Falló la detección. Revisá Python, Silero y la ruta de FFmpeg.")
+        status("running", -1, "Preparando los cortes", "Comprobando las pistas de la timeline.")
+        return bridge.cortar(job.project, job.timeline, tsv, job.first, job.last, function(done, total)
+            status("running", math.floor(100 * done / total), "Eliminando silencios",
+                string.format("%d de %d eliminados y verificados", done, total))
+        end)
+    end)
+    if not ok then
+        status("error", -1, "El proceso se detuvo", tostring(count):gsub("^.-%.lua:%d+: ", ""))
+        error(count, 0)
+    end
+    local summary = count == 0 and "No hay silencios que ocupen un fotograma completo."
+        or string.format("%d silencios eliminados (%.2f s).", count, seconds)
+    status("done", 100, "Listo", summary)
+    return count
 end
 
 return bridge
