@@ -1,0 +1,9 @@
+/work/
+__pycache__/
+*.wav
+*.mp3
+*.mp4
+*.mov
+/outputs/cortar_otio.py
+/outputs/resolve_teclado.py
+/outputs/ResolveMenuAsync.exe
